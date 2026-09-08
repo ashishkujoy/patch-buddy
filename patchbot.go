@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 
 	"github.com/ashishkujoy/patchbot/internal"
 )
 
 func main() {
-	err, findings, stderr := internal.RunVulnerabilityCheck(context.Background(), ".")
+	workdir := flag.String("workdir", ".", "Directory where patch bot needs to run")
+	flag.Parse()
+	err, findings, stderr := internal.RunVulnerabilityCheck(context.Background(), *workdir)
 	if err != nil {
 		panic(err)
 	}
