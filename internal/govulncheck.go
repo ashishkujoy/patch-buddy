@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os/exec"
+
+	"github.com/Masterminds/semver/v3"
 )
 
 type position struct {
@@ -29,6 +32,11 @@ type Finding struct {
 	Trace        []trace `json:"trace"`
 }
 
+type UpgradableFinding struct {
+	Module       string          `json:"module"`
+	FixedVersion *semver.Version `json:"fixed_version"`
+}
+
 type output struct {
 	Finding Finding `json:"finding"`
 }
@@ -46,6 +54,38 @@ func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []Findin
 	findings := parseFindings(stdout)
 
 	return err, findings, stderr
+}
+
+// toUpgradableFindings creates upgradable findings merging same module keeping the highest fixable version as fixable version
+func toUpgradableFindings(findings []Finding) []*UpgradableFinding {
+	m := make(map[string]*UpgradableFinding)
+	for _, finding := range findings {
+		module := finding.Trace[0].Module
+		version, err := semver.NewVersion(finding.FixedVersion)
+		if err != nil {
+			_ = fmt.Errorf(
+				"failed to parse version for %s, fixed version %s\n",
+				module,
+				finding.FixedVersion,
+			)
+			continue
+		}
+		upgradableFinding := UpgradableFinding{
+			Module:       module,
+			FixedVersion: version,
+		}
+		existingUpgradableFinding, ok := m[module]
+		if ok && existingUpgradableFinding.FixedVersion.GreaterThan(version) {
+			upgradableFinding.FixedVersion = version
+		}
+		m[module] = &upgradableFinding
+	}
+
+	upgradableDependencies := make([]*UpgradableFinding, 0, len(m))
+	for _, upgradableFinding := range m {
+		upgradableDependencies = append(upgradableDependencies, upgradableFinding)
+	}
+	return upgradableDependencies
 }
 
 func parseFindings(stdout bytes.Buffer) []Finding {
