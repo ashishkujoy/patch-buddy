@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/ashishkujoy/patchbot/internal"
 )
@@ -17,9 +16,8 @@ func main() {
 		_ = fmt.Errorf("%s", string(stderr.Bytes()))
 		return
 	}
-	for i, finding := range findings {
-		fmt.Printf("%s %d %s\n", strings.Repeat("*", 20), i, strings.Repeat("*", 20))
-		fmt.Println(finding)
-		fmt.Printf("%s %d %s\n", strings.Repeat("*", 20), i, strings.Repeat("*", 20))
+	fmt.Printf("%d dependencies need upgrade\n", len(findings))
+	for _, finding := range findings {
+		fmt.Printf("%s %s\n", finding.Module, finding.FixedVersion.Original())
 	}
 }

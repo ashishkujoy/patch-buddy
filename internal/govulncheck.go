@@ -43,7 +43,7 @@ type output struct {
 
 // RunVulnerabilityCheck reports vulnerabilities using govulncheck command.
 // ensure to install govulncheck: https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck
-func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []Finding, bytes.Buffer) {
+func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []*UpgradableFinding, bytes.Buffer) {
 	cmd := exec.CommandContext(ctx, "govulncheck", "-format=json", "./...")
 	var stdout, stderr bytes.Buffer
 	cmd.Dir = workdir
@@ -51,7 +51,7 @@ func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []Findin
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 
-	findings := parseFindings(stdout)
+	findings := toUpgradableFindings(parseFindings(stdout))
 
 	return err, findings, stderr
 }
