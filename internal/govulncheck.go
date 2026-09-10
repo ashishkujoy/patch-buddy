@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -32,76 +34,253 @@ type Finding struct {
 	Trace        []trace `json:"trace"`
 }
 
+// osvPackage identifies the module path a single OSV affected-entry describes.
+type osvPackage struct {
+	Name      string `json:"name"`
+	Ecosystem string `json:"ecosystem"`
+}
+
+type osvEvent struct {
+	Introduced string `json:"introduced"`
+	Fixed      string `json:"fixed"`
+}
+
+type osvRange struct {
+	Type   string     `json:"type"`
+	Events []osvEvent `json:"events"`
+}
+
+type osvAffected struct {
+	Package osvPackage `json:"package"`
+	Ranges  []osvRange `json:"ranges"`
+}
+
+// OsvEntry is the subset of a vuln.go.dev OSV record patchbot needs to
+// classify a fix: which module path(s) carry a fix, and at which version.
+type OsvEntry struct {
+	Id       string        `json:"id"`
+	Summary  string        `json:"summary"`
+	Affected []osvAffected `json:"affected"`
+}
+
+// UpgradableFinding is a fix patchbot can attempt to apply automatically.
+// Module/FixedVersion is the target to `go get`; CurrentModule is the import
+// path found in go.mod. They differ when the fix requires a cross-module
+// import-path rewrite (see patchbot-breaking-upgrade-context.md).
 type UpgradableFinding struct {
-	Module       string          `json:"module"`
-	FixedVersion *semver.Version `json:"fixed_version"`
+	Module        string          `json:"module"`
+	CurrentModule string          `json:"current_module"`
+	FixedVersion  *semver.Version `json:"fixed_version"`
+	SameModule    bool            `json:"same_module"`
+}
+
+// UnresolvedFinding is a reachable vulnerability with no published fix for
+// either the currently imported module path or any known alternative -
+// there is nothing for patchbot to `go get`, so it needs human triage.
+type UnresolvedFinding struct {
+	Module  string
+	Osv     string
+	Summary string
 }
 
 type output struct {
-	Finding Finding `json:"finding"`
+	Finding Finding  `json:"finding"`
+	Osv     OsvEntry `json:"osv"`
 }
 
 // RunVulnerabilityCheck reports vulnerabilities using govulncheck command.
 // ensure to install govulncheck: https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck
-func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []*UpgradableFinding, bytes.Buffer) {
+func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []*UpgradableFinding, []*UnresolvedFinding, string) {
+	fmt.Println("Starting scanner")
 	cmd := exec.CommandContext(ctx, "govulncheck", "-format=json", "./...")
 	var stdout, stderr bytes.Buffer
 	cmd.Dir = workdir
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if err != nil {
+		_ = fmt.Errorf("Scan complete %w\n", err)
+	} else {
+		fmt.Println("Scan complete")
+	}
+	findings, osvById := parseOutputs(stdout)
+	upgradableFindings, unresolvedFindings := toUpgradableFindings(findings, osvById)
 
-	findings := toUpgradableFindings(parseFindings(stdout))
-
-	return err, findings, stderr
+	return err, upgradableFindings, unresolvedFindings, string(stderr.Bytes())
 }
 
-// toUpgradableFindings creates upgradable findings merging same module keeping the highest fixable version as fixable version
-func toUpgradableFindings(findings []Finding) []*UpgradableFinding {
-	m := make(map[string]*UpgradableFinding)
+// toUpgradableFindings classifies each Finding against its OSV record,
+// merging same-module-path findings and keeping the highest fixed version.
+// Findings for which no fix is published anywhere are returned separately.
+func toUpgradableFindings(findings []Finding, osvById map[string]OsvEntry) ([]*UpgradableFinding, []*UnresolvedFinding) {
+	upgrades := make(map[string]*UpgradableFinding)
+	unresolved := make(map[string]*UnresolvedFinding)
+
 	for _, finding := range findings {
-		module := finding.Trace[0].Module
-		version, err := semver.NewVersion(finding.FixedVersion)
+		currentModule := finding.Trace[0].Module
+		entry, ok := osvById[finding.Osv]
+		if !ok {
+			_ = fmt.Errorf("no osv record found for finding %s\n", finding.Osv)
+			continue
+		}
+
+		target := classify(currentModule, entry)
+		if target == nil {
+			unresolved[currentModule] = &UnresolvedFinding{
+				Module:  currentModule,
+				Osv:     finding.Osv,
+				Summary: entry.Summary,
+			}
+			continue
+		}
+
+		upgradableFinding := &UpgradableFinding{
+			Module:        target.Module,
+			CurrentModule: currentModule,
+			FixedVersion:  target.FixedVersion,
+			SameModule:    target.SameModule,
+		}
+		if existing, exists := upgrades[currentModule]; exists && existing.FixedVersion.GreaterThan(target.FixedVersion) {
+			upgradableFinding.FixedVersion = existing.FixedVersion
+		}
+		upgrades[currentModule] = upgradableFinding
+	}
+
+	upgradableFindings := make([]*UpgradableFinding, 0, len(upgrades))
+	for _, upgrade := range upgrades {
+		upgradableFindings = append(upgradableFindings, upgrade)
+	}
+	unresolvedFindings := make([]*UnresolvedFinding, 0, len(unresolved))
+	for _, u := range unresolved {
+		unresolvedFindings = append(unresolvedFindings, u)
+	}
+	return upgradableFindings, unresolvedFindings
+}
+
+// classify resolves an OSV record against the module path patchbot actually
+// imports, returning the best fix target - or nil if no fix is published
+// for the current module path or a viable alternative.
+//
+// A same-module fix always wins (it's a plain version bump). Otherwise, if
+// the advisory only carries a fix for a different module path, that's a
+// cross-module fix: the caller must rewrite import paths, not just `go get`.
+// See patchbot-breaking-upgrade-context.md §3.
+func classify(currentModule string, entry OsvEntry) *UpgradableFinding {
+	var sameModuleFix, altModuleFix *UpgradableFinding
+	altScore := -1
+
+	for _, affected := range entry.Affected {
+		fixedVersionStr := latestFixedVersion(affected.Ranges)
+		if fixedVersionStr == "" {
+			continue
+		}
+		fixedVersion, err := semver.NewVersion(fixedVersionStr)
 		if err != nil {
 			_ = fmt.Errorf(
-				"failed to parse version for %s, fixed version %s\n",
-				module,
-				finding.FixedVersion,
+				"failed to parse fixed version %s for %s\n",
+				fixedVersionStr,
+				affected.Package.Name,
 			)
 			continue
 		}
-		upgradableFinding := UpgradableFinding{
-			Module:       module,
-			FixedVersion: version,
+
+		if affected.Package.Name == currentModule {
+			sameModuleFix = &UpgradableFinding{
+				Module:       affected.Package.Name,
+				FixedVersion: fixedVersion,
+				SameModule:   true,
+			}
+			continue
 		}
-		existingUpgradableFinding, ok := m[module]
-		if ok && existingUpgradableFinding.FixedVersion.GreaterThan(version) {
-			upgradableFinding.FixedVersion = version
+
+		if score := altModuleScore(currentModule, affected.Package.Name); score > altScore {
+			altScore = score
+			altModuleFix = &UpgradableFinding{
+				Module:       affected.Package.Name,
+				FixedVersion: fixedVersion,
+				SameModule:   false,
+			}
 		}
-		m[module] = &upgradableFinding
 	}
 
-	upgradableDependencies := make([]*UpgradableFinding, 0, len(m))
-	for _, upgradableFinding := range m {
-		upgradableDependencies = append(upgradableDependencies, upgradableFinding)
+	if sameModuleFix != nil {
+		return sameModuleFix
 	}
-	return upgradableDependencies
+	return altModuleFix
 }
 
-func parseFindings(stdout bytes.Buffer) []Finding {
+// altModuleScore ranks a candidate alternative module path so classify can
+// pick the practically best cross-module target when an advisory lists more
+// than one: a same-base-path "/vN" major-version bump outranks any other
+// listed module path (e.g. an unrelated fork).
+//
+// Some advisories only list a fix the ecosystem itself abandoned (e.g.
+// jwt-go/v4's preview release) while the community migrated to an unrelated
+// replacement module not present in affected[] at all - see context doc
+// §3/§7. Steering classify() to such a module needs a curated
+// vulnerable-path -> replacement table (deliberately not built here: it
+// can't be inferred programmatically, and the replacement's own fixed
+// version isn't sourced from this OSV record).
+func altModuleScore(currentModule, candidate string) int {
+	if isNextMajorVersionPath(currentModule, candidate) {
+		return 1
+	}
+	return 0
+}
+
+// isNextMajorVersionPath reports whether candidate is base + "/vN", the Go
+// module convention for encoding a breaking major version in the import
+// path itself.
+func isNextMajorVersionPath(base, candidate string) bool {
+	suffix, ok := strings.CutPrefix(candidate, base+"/v")
+	if !ok {
+		return false
+	}
+	_, err := strconv.Atoi(suffix)
+	return err == nil
+}
+
+// latestFixedVersion walks an affected[].ranges[].events[] list and returns
+// the last "fixed" version recorded, or "" if the range is still open
+// (govulncheck/the CLI renders this as `Fixed in: N/A`).
+func latestFixedVersion(ranges []osvRange) string {
+	var fixed string
+	for _, r := range ranges {
+		if r.Type != "SEMVER" {
+			continue
+		}
+		for _, event := range r.Events {
+			if event.Fixed != "" {
+				fixed = event.Fixed
+			}
+		}
+	}
+	return fixed
+}
+
+// parseOutputs decodes a govulncheck -format=json stream (concatenated JSON
+// objects, not newline-delimited) into the reachable Findings and an index
+// of every OSV record seen, keyed by id, so each Finding can be classified
+// against its full affected[] list.
+func parseOutputs(stdout bytes.Buffer) ([]Finding, map[string]OsvEntry) {
 	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
 	var findings []Finding
+	osvById := make(map[string]OsvEntry)
 	for {
 		var _output output
 		decodingErr := decoder.Decode(&_output)
 		if decodingErr == io.EOF {
 			break
 		}
-		// not a finding block
-		if decodingErr != nil || _output.Finding.Osv == "" {
+		if decodingErr != nil {
 			continue
 		}
-		findings = append(findings, _output.Finding)
+		if _output.Osv.Id != "" {
+			osvById[_output.Osv.Id] = _output.Osv
+		}
+		if _output.Finding.Osv != "" {
+			findings = append(findings, _output.Finding)
+		}
 	}
-	return findings
+	return findings, osvById
 }

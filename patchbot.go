@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/ashishkujoy/patchbot/internal"
 )
@@ -11,16 +12,32 @@ import (
 func main() {
 	workdir := flag.String("workdir", ".", "Directory where patch bot needs to run")
 	flag.Parse()
-	err, findings, stderr := internal.RunVulnerabilityCheck(context.Background(), *workdir)
+	ctx := context.Background()
+	err, findings, unresolved, stderr := internal.RunVulnerabilityCheck(ctx, *workdir)
+
+	fmt.Println(stderr)
 	if err != nil {
-		panic(err)
-	}
-	if stderr.Len() != 0 {
-		_ = fmt.Errorf("%s", string(stderr.Bytes()))
-		return
+		_ = fmt.Errorf("failed to run vulnerability check: %w", err)
+		os.Exit(1)
 	}
 	fmt.Printf("%d dependencies need upgrade\n", len(findings))
 	for _, finding := range findings {
-		fmt.Printf("%s %s\n", finding.Module, finding.FixedVersion.Original())
+		if finding.SameModule {
+			fmt.Printf("%s %s\n", finding.Module, finding.FixedVersion.Original())
+		} else {
+			fmt.Printf("%s -> %s %s (cross-module fix)\n", finding.CurrentModule, finding.Module, finding.FixedVersion.Original())
+		}
+	}
+	if len(unresolved) > 0 {
+		fmt.Printf("%d vulnerabilities have no published fix, needs manual triage\n", len(unresolved))
+		for _, u := range unresolved {
+			fmt.Printf("%s (%s): %s\n", u.Module, u.Osv, u.Summary)
+		}
+	}
+	err = internal.UpdateDependencies(ctx, *workdir, findings)
+
+	if err != nil {
+		_ = fmt.Errorf("failed to upgrade dependencies %w", err)
+		os.Exit(2)
 	}
 }
