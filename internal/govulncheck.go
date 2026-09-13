@@ -102,6 +102,14 @@ func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []*Upgra
 	return err, upgradableFindings, unresolvedFindings, result.Stderr
 }
 
+func values[T any](m map[string]*T) []*T {
+	v := make([]*T, 0, len(m))
+	for _, value := range m {
+		v = append(v, value)
+	}
+	return v
+}
+
 // toUpgradableFindings classifies each Finding against its OSV record,
 // merging same-module-path findings and keeping the highest fixed version.
 // Findings for which no fix is published anywhere are returned separately.
@@ -139,15 +147,7 @@ func toUpgradableFindings(findings []Finding, osvById map[string]OsvEntry) ([]*U
 		upgrades[currentModule] = upgradableFinding
 	}
 
-	upgradableFindings := make([]*UpgradableFinding, 0, len(upgrades))
-	for _, upgrade := range upgrades {
-		upgradableFindings = append(upgradableFindings, upgrade)
-	}
-	unresolvedFindings := make([]*UnresolvedFinding, 0, len(unresolved))
-	for _, u := range unresolved {
-		unresolvedFindings = append(unresolvedFindings, u)
-	}
-	return upgradableFindings, unresolvedFindings
+	return values(upgrades), values(unresolved)
 }
 
 // classify resolves an OSV record against the module path patchbot actually
