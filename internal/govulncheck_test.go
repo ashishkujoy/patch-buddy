@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"bytes"
 	"os"
 	"testing"
 
@@ -10,9 +9,9 @@ import (
 )
 
 func Test_ParseGoVulnerabilityCheckFindings(t *testing.T) {
-	buf := readFileAsBuffer(t)
+	data := readTestData(t)
 
-	findings, osvById := parseOutputs(buf)
+	findings, osvById := parseOutputs(data)
 	assert.NotEmpty(t, findings)
 	assert.Equal(t, 6, len(findings))
 	for _, finding := range findings {
@@ -178,13 +177,8 @@ func Test_Classify_NoFixAvailable(t *testing.T) {
 	assert.Nil(t, target)
 }
 
-func readFileAsBuffer(t *testing.T) bytes.Buffer {
-	file, err := os.Open("./test_data.txt")
+func readTestData(t *testing.T) string {
+	data, err := os.ReadFile("./test_data.txt")
 	assert.NoError(t, err)
-	defer func(file *os.File) { _ = file.Close() }(file)
-
-	var buf bytes.Buffer
-	_, err = buf.ReadFrom(file)
-	assert.NoError(t, err)
-	return buf
+	return string(data)
 }

@@ -1,12 +1,10 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -92,21 +90,16 @@ type output struct {
 // ensure to install govulncheck: https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck
 func RunVulnerabilityCheck(ctx context.Context, workdir string) (error, []*UpgradableFinding, []*UnresolvedFinding, string) {
 	fmt.Println("Starting scanner")
-	cmd := exec.CommandContext(ctx, "govulncheck", "-format=json", "./...")
-	var stdout, stderr bytes.Buffer
-	cmd.Dir = workdir
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	result, err := runCommand(ctx, workdir, "govulncheck", "-format=json", "./...")
 	if err != nil {
-		_ = fmt.Errorf("Scan complete %w\n", err)
+		fmt.Printf("scan finished with error: %s\n", err)
 	} else {
 		fmt.Println("Scan complete")
 	}
-	findings, osvById := parseOutputs(stdout)
+	findings, osvById := parseOutputs(result.Stdout)
 	upgradableFindings, unresolvedFindings := toUpgradableFindings(findings, osvById)
 
-	return err, upgradableFindings, unresolvedFindings, string(stderr.Bytes())
+	return err, upgradableFindings, unresolvedFindings, result.Stderr
 }
 
 // toUpgradableFindings classifies each Finding against its OSV record,
@@ -262,8 +255,8 @@ func latestFixedVersion(ranges []osvRange) string {
 // objects, not newline-delimited) into the reachable Findings and an index
 // of every OSV record seen, keyed by id, so each Finding can be classified
 // against its full affected[] list.
-func parseOutputs(stdout bytes.Buffer) ([]Finding, map[string]OsvEntry) {
-	decoder := json.NewDecoder(bytes.NewReader(stdout.Bytes()))
+func parseOutputs(stdout string) ([]Finding, map[string]OsvEntry) {
+	decoder := json.NewDecoder(strings.NewReader(stdout))
 	var findings []Finding
 	osvById := make(map[string]OsvEntry)
 	for {

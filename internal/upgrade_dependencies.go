@@ -1,10 +1,8 @@
 package internal
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +22,8 @@ type UpgradeResult struct {
 	BuildOK     bool
 	BuildLog    string
 	BuildStderr string
+	Committed   bool
+	CommitErr   error
 }
 
 func UpdateDependencies(ctx context.Context, workdir string, dependencies []*UpgradableFinding) ([]*UpgradeResult, error) {
@@ -51,6 +51,15 @@ func UpdateDependencies(ctx context.Context, workdir string, dependencies []*Upg
 		result.BuildOK = buildErr == nil
 		result.BuildLog = buildLog
 		result.BuildStderr = buildStderr
+
+		if result.BuildOK {
+			if commitErr := commitUpgrade(ctx, workdir, dependency); commitErr != nil {
+				result.CommitErr = commitErr
+			} else {
+				result.Committed = true
+			}
+		}
+
 		results = append(results, result)
 	}
 	return results, nil
@@ -71,15 +80,9 @@ func orderBySameModuleFirst(dependencies []*UpgradableFinding) []*UpgradableFind
 
 func createUpgradeBranch(ctx context.Context, workingDir string) error {
 	branchName := fmt.Sprintf("patchbot-%d", time.Now().UnixMilli())
-	cmd := exec.CommandContext(ctx, "git", "checkout", "-b", branchName)
-	var stderr, stdout bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Stdout = &stdout
-	cmd.Dir = workingDir
-
-	err := cmd.Run()
+	result, err := runCommand(ctx, workingDir, "git", "checkout", "-b", branchName)
 	if err != nil {
-		return fmt.Errorf("failed to create branch %s\n %s\n", branchName, string(stderr.Bytes()))
+		return fmt.Errorf("failed to create branch %s\n %s\n", branchName, result.Stderr)
 	}
 	fmt.Printf("Checked out patch branch %s\n", branchName)
 	return nil
@@ -98,21 +101,41 @@ func upgradeDependency(ctx context.Context, workdir string, dependency *Upgradab
 	}
 
 	target := fmt.Sprintf("%s@%s", dependency.Module, goModuleVersion(dependency.FixedVersion))
-	cmd := exec.CommandContext(ctx, "go", "get", target)
-	cmd.Dir = workdir
-	if err := cmd.Run(); err != nil {
+	if _, err := runCommand(ctx, workdir, "go", "get", target); err != nil {
 		return fmt.Errorf("go get %s failed: %w", target, err)
 	}
 
 	if !dependency.SameModule {
-		tidyCmd := exec.CommandContext(ctx, "go", "mod", "tidy")
-		tidyCmd.Dir = workdir
-		if err := tidyCmd.Run(); err != nil {
+		if _, err := runCommand(ctx, workdir, "go", "mod", "tidy"); err != nil {
 			return fmt.Errorf("go mod tidy failed after cross-module fix: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// commitUpgrade commits one dependency's fix as its own commit once its
+// build has been verified clean, before the next dependency is attempted -
+// so a later breaking-change fix never gets bundled into the same commit as
+// fixes that already landed cleanly, and a failed fix leaves the working
+// tree at the last known-good commit rather than piling on top of it.
+func commitUpgrade(ctx context.Context, workdir string, dependency *UpgradableFinding) error {
+	if _, err := runCommand(ctx, workdir, "git", "add", "-A"); err != nil {
+		return fmt.Errorf("git add failed: %w", err)
+	}
+	message := commitMessage(dependency)
+	if result, err := runCommand(ctx, workdir, "git", "commit", "-m", message); err != nil {
+		return fmt.Errorf("git commit failed: %w\n%s", err, result.Stderr)
+	}
+	return nil
+}
+
+func commitMessage(dependency *UpgradableFinding) string {
+	version := goModuleVersion(dependency.FixedVersion)
+	if dependency.SameModule {
+		return fmt.Sprintf("patchbot: upgrade %s to %s", dependency.Module, version)
+	}
+	return fmt.Sprintf("patchbot: migrate %s to %s@%s", dependency.CurrentModule, dependency.Module, version)
 }
 
 // goModuleVersion renders a fixed version as a Go module version query. The
@@ -134,11 +157,6 @@ func goModuleVersion(v *semver.Version) string {
 // trusted as a mechanical fix. stderr is returned separately from stdout
 // since that's where the compiler error text §6 wants as seed context lands.
 func runBuild(ctx context.Context, workdir string) (error, string, string) {
-	cmd := exec.CommandContext(ctx, "go", "build", "./...")
-	cmd.Dir = workdir
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return err, stdout.String(), stderr.String()
+	result, err := runCommand(ctx, workdir, "go", "build", "./...")
+	return err, result.Stdout, result.Stderr
 }
