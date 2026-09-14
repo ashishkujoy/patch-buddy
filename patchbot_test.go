@@ -87,6 +87,41 @@ func Test_PrintResults_SeparatesFixedFromNeedsAttention(t *testing.T) {
 	assert.False(t, strings.Contains(out[fixedIdx:attentionIdx], "jwt-go"))
 }
 
+func Test_PrintResults_ReportsResolvedFixAttempt(t *testing.T) {
+	var buf bytes.Buffer
+
+	result := &internal.UpgradeResult{
+		Finding:     &internal.UpgradableFinding{CurrentModule: "github.com/dgrijalva/jwt-go", FixedVersion: mustVersion(t, "4.0.0-preview1")},
+		Applied:     true,
+		BuildOK:     false,
+		BuildStderr: "undefined: VerifyAudience",
+		FixAttempt:  &internal.FixAttempt{Resolved: true, Iterations: 2},
+	}
+
+	printResults(&buf, []*internal.UpgradeResult{result})
+	out := buf.String()
+
+	assert.Contains(t, out, "AI fix loop resolved it in 2 iteration(s)")
+	assert.Contains(t, out, "NOT committed")
+}
+
+func Test_PrintResults_ReportsUnresolvedFixAttempt(t *testing.T) {
+	var buf bytes.Buffer
+
+	result := &internal.UpgradeResult{
+		Finding:     &internal.UpgradableFinding{CurrentModule: "github.com/dgrijalva/jwt-go", FixedVersion: mustVersion(t, "4.0.0-preview1")},
+		Applied:     true,
+		BuildOK:     false,
+		BuildStderr: "undefined: VerifyAudience",
+		FixAttempt:  &internal.FixAttempt{Resolved: false, Iterations: 5, Err: errors.New("model proposed no fix on iteration 5")},
+	}
+
+	printResults(&buf, []*internal.UpgradeResult{result})
+	out := buf.String()
+
+	assert.Contains(t, out, "AI fix loop did not resolve it after 5 iteration(s): model proposed no fix on iteration 5")
+}
+
 func Test_PrintResults_NoResults_PrintsEmptySections(t *testing.T) {
 	var buf bytes.Buffer
 

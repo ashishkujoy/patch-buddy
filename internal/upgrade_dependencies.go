@@ -24,9 +24,24 @@ type UpgradeResult struct {
 	BuildStderr string
 	Committed   bool
 	CommitErr   error
+	// FixAttempt is set when the build failed and a BreakingChangeFixer was
+	// given to UpdateDependencies. A resolved attempt means the working tree
+	// now builds clean, but it is deliberately left uncommitted - see
+	// BreakingChangeFixer.
+	FixAttempt *FixAttempt
 }
 
-func UpdateDependencies(ctx context.Context, workdir string, dependencies []*UpgradableFinding) ([]*UpgradeResult, error) {
+// UpdateDependencies applies each dependency's fix, in same-module-first
+// order, committing every one that builds clean. When a build fails and
+// fixer is non-nil, fixer.Fix is given a chance to resolve it before moving
+// on - pass nil to skip the AI fix loop entirely (e.g. no API key
+// configured).
+func UpdateDependencies(
+	ctx context.Context,
+	workdir string,
+	dependencies []*UpgradableFinding,
+	fixer BreakingChangeFixer,
+) ([]*UpgradeResult, error) {
 	if len(dependencies) == 0 {
 		return nil, nil
 	}
@@ -58,6 +73,8 @@ func UpdateDependencies(ctx context.Context, workdir string, dependencies []*Upg
 			} else {
 				result.Committed = true
 			}
+		} else if fixer != nil {
+			result.FixAttempt = fixer.Fix(ctx, workdir, dependency, buildStderr)
 		}
 
 		results = append(results, result)

@@ -4,8 +4,12 @@ go 1.27.1
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
+	github.com/OpenRouterTeam/go-sdk v0.7.132
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/tools v0.50.0
 )
 
-require go.yaml.in/yaml/v3 v3.0.5 // indirect
+require (
+	github.com/spyzhov/ajson v0.8.0 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
+)

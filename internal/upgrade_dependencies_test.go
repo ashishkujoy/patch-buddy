@@ -193,7 +193,7 @@ func Test_UpdateDependencies_NoDependencies_SkipsBranchCreation(t *testing.T) {
 		return commandOutput{}, nil
 	})
 
-	results, err := UpdateDependencies(context.Background(), t.TempDir(), nil)
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, results)
 	assert.Empty(t, *calls)
@@ -208,7 +208,7 @@ func Test_UpdateDependencies_BranchCreationFailure_ShortCircuits(t *testing.T) {
 		{Module: "golang.org/x/text", CurrentModule: "golang.org/x/text", FixedVersion: mustVersion(t, "0.39.0"), SameModule: true},
 	}
 
-	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies)
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies, nil)
 	require.Error(t, err)
 	assert.Nil(t, results)
 	// only the failed branch-creation call was made - no upgrade was attempted
@@ -233,7 +233,7 @@ func Test_UpdateDependencies_ProcessesSameModuleFirstAndTracksResults(t *testing
 		SameModule:    true,
 	}
 
-	results, err := UpdateDependencies(context.Background(), t.TempDir(), []*UpgradableFinding{crossModule, sameModule})
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), []*UpgradableFinding{crossModule, sameModule}, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 2)
 
@@ -259,7 +259,7 @@ func Test_UpdateDependencies_BuildFails_SkipsCommit(t *testing.T) {
 		{Module: "golang.org/x/text", CurrentModule: "golang.org/x/text", FixedVersion: mustVersion(t, "0.39.0"), SameModule: true},
 	}
 
-	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies)
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 
@@ -269,6 +269,63 @@ func Test_UpdateDependencies_BuildFails_SkipsCommit(t *testing.T) {
 	for _, call := range *calls {
 		assert.NotEqual(t, "commit", firstArgOrEmpty(call.args), "a failed build must never be committed")
 	}
+}
+
+// fakeFixer is a BreakingChangeFixer test double that records how it was
+// called and returns a canned FixAttempt.
+type fakeFixer struct {
+	attempt       *FixAttempt
+	calledWorkdir string
+	calledFinding *UpgradableFinding
+	calledStderr  string
+	invocations   int
+}
+
+func (f *fakeFixer) Fix(_ context.Context, workdir string, dependency *UpgradableFinding, buildStderr string) *FixAttempt {
+	f.invocations++
+	f.calledWorkdir = workdir
+	f.calledFinding = dependency
+	f.calledStderr = buildStderr
+	return f.attempt
+}
+
+func Test_UpdateDependencies_BuildFails_InvokesFixerAndStoresAttempt(t *testing.T) {
+	stubRunCommand(t, func(call fakeCall) (commandOutput, error) {
+		if call.name == "go" && len(call.args) > 0 && call.args[0] == "build" {
+			return commandOutput{Stderr: "undefined: OldFunc"}, errors.New("exit status 1")
+		}
+		return commandOutput{}, nil
+	})
+
+	dependency := &UpgradableFinding{Module: "golang.org/x/text", CurrentModule: "golang.org/x/text", FixedVersion: mustVersion(t, "0.39.0"), SameModule: true}
+	fixer := &fakeFixer{attempt: &FixAttempt{Resolved: true, Iterations: 2}}
+	workdir := t.TempDir()
+
+	results, err := UpdateDependencies(context.Background(), workdir, []*UpgradableFinding{dependency}, fixer)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.Same(t, fixer.attempt, results[0].FixAttempt)
+	assert.Equal(t, 1, fixer.invocations)
+	assert.Equal(t, workdir, fixer.calledWorkdir)
+	assert.Same(t, dependency, fixer.calledFinding)
+	assert.Equal(t, "undefined: OldFunc", fixer.calledStderr)
+}
+
+func Test_UpdateDependencies_BuildSucceeds_NeverInvokesFixer(t *testing.T) {
+	stubRunCommand(t, func(fakeCall) (commandOutput, error) {
+		return commandOutput{}, nil
+	})
+
+	dependency := &UpgradableFinding{Module: "golang.org/x/text", CurrentModule: "golang.org/x/text", FixedVersion: mustVersion(t, "0.39.0"), SameModule: true}
+	fixer := &fakeFixer{attempt: &FixAttempt{Resolved: true}}
+
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), []*UpgradableFinding{dependency}, fixer)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	assert.Equal(t, 0, fixer.invocations)
+	assert.Nil(t, results[0].FixAttempt)
 }
 
 func Test_UpdateDependencies_CommitFails_MarksResultUncommitted(t *testing.T) {
@@ -283,7 +340,7 @@ func Test_UpdateDependencies_CommitFails_MarksResultUncommitted(t *testing.T) {
 		{Module: "golang.org/x/text", CurrentModule: "golang.org/x/text", FixedVersion: mustVersion(t, "0.39.0"), SameModule: true},
 	}
 
-	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies)
+	results, err := UpdateDependencies(context.Background(), t.TempDir(), dependencies, nil)
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 

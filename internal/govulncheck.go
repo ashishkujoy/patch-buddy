@@ -70,6 +70,10 @@ type UpgradableFinding struct {
 	CurrentModule string          `json:"current_module"`
 	FixedVersion  *semver.Version `json:"fixed_version"`
 	SameModule    bool            `json:"same_module"`
+	// Summary is the OSV advisory's one-line summary - context for the
+	// breaking-change fix loop (patchbot-breaking-upgrade-context.md §6),
+	// not used by classification itself.
+	Summary string `json:"summary"`
 }
 
 // UnresolvedFinding is a reachable vulnerability with no published fix for
@@ -140,6 +144,7 @@ func toUpgradableFindings(findings []Finding, osvById map[string]OsvEntry) ([]*U
 			CurrentModule: currentModule,
 			FixedVersion:  target.FixedVersion,
 			SameModule:    target.SameModule,
+			Summary:       entry.Summary,
 		}
 		if existing, exists := upgrades[currentModule]; exists && existing.FixedVersion.GreaterThan(target.FixedVersion) {
 			upgradableFinding.FixedVersion = existing.FixedVersion

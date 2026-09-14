@@ -23,7 +23,12 @@ func main() {
 	}
 	printScanSummary(os.Stdout, findings, unresolved)
 
-	results, err := internal.UpdateDependencies(ctx, *workdir, findings)
+	fixer := internal.NewOpenRouterFixer()
+	if fixer == nil {
+		fmt.Println("OPENROUTER_API_KEY not set: breaking-change build failures will need manual triage")
+	}
+
+	results, err := internal.UpdateDependencies(ctx, *workdir, findings, fixer)
 	if err != nil {
 		_ = fmt.Errorf("failed to upgrade dependencies %w", err)
 		os.Exit(2)
@@ -103,8 +108,27 @@ func printResults(w io.Writer, results []*internal.UpgradeResult) {
 			fmt.Fprintf(w, "[apply failed] %s -> %s: %s\n", result.Finding.CurrentModule, result.Finding.FixedVersion.Original(), result.Err)
 		case !result.BuildOK:
 			fmt.Fprintf(w, "[build failed] %s -> %s: breaking change\n%s\n", result.Finding.CurrentModule, result.Finding.FixedVersion.Original(), result.BuildStderr)
+			printFixAttempt(w, result.FixAttempt)
 		default:
 			fmt.Fprintf(w, "[commit failed] %s -> %s: %s\n", result.Finding.CurrentModule, result.Finding.FixedVersion.Original(), result.CommitErr)
 		}
 	}
+}
+
+// printFixAttempt reports whether the AI breaking-change fix loop resolved
+// the build - it does not change the "Needs attention" outcome above, since
+// a resolved fix is still left uncommitted for human review (§6.5).
+func printFixAttempt(w io.Writer, attempt *internal.FixAttempt) {
+	if attempt == nil {
+		return
+	}
+	if attempt.Resolved {
+		fmt.Fprintf(w, "  AI fix loop resolved it in %d iteration(s) - build is clean now, but NOT committed; review the working tree before merging\n", attempt.Iterations)
+		return
+	}
+	fmt.Fprintf(w, "  AI fix loop did not resolve it after %d iteration(s)", attempt.Iterations)
+	if attempt.Err != nil {
+		fmt.Fprintf(w, ": %s", attempt.Err)
+	}
+	fmt.Fprintln(w)
 }
